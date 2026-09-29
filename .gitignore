@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+verify-out/
+exported-svgs/
+fixtures/
+data/
+*.log
+.DS_Store

@@ -1,0 +1,39 @@
+{
+  "name": "figma-proxy-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Figma \u2192 code: normalised IR, Tailwind theme, PNG renders and visual diff (verify_render).",
+  "main": "proxy-mcp.js",
+  "bin": {
+    "figma-proxy-mcp": "proxy-mcp.js"
+  },
+  "scripts": {
+    "start": "node proxy-mcp.js --stdio",
+    "http": "node proxy-mcp.js",
+    "postinstall": "echo 'For verify_render run: npx playwright install chromium'"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Semmargl/figma-proxy-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "figma",
+    "model-context-protocol",
+    "figma-to-code",
+    "tailwind",
+    "claude"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.10.0",
+    "eventsource": "^4.0.0",
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2",
+    "pixelmatch": "^5.3.0",
+    "playwright": "^1.44.0",
+    "pngjs": "^7.0.0"
+  }
+}

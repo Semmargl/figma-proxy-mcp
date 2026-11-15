@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- Add `mcpName` and `server.json` for the official MCP Registry (io.github.Semmargl/figma-proxy-mcp).
+
 ## 1.1.0
 
 ### Added

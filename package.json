@@ -1,6 +1,7 @@
 {
   "name": "figma-proxy-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "mcpName": "io.github.Semmargl/figma-proxy-mcp",
   "description": "Read-only MCP server for Figma to code: normalised IR, Tailwind theme, PNG renders and visual diff (verify_render).",
   "keywords": [
     "mcp",

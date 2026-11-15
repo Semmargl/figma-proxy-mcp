@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Semmargl/figma-proxy-mcp",
+  "title": "Figma Proxy MCP",
+  "description": "Figma → code: tokenized IR, PNG renders and SSIM/pixel visual diff to verify builds.",
+  "repository": {
+    "url": "https://github.com/Semmargl/figma-proxy-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Semmargl/figma-proxy-mcp",
+  "version": "1.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "figma-proxy-mcp",
+      "version": "1.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "FIGMA_API_KEY",
+          "description": "Figma personal access token (read-only file content scope)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

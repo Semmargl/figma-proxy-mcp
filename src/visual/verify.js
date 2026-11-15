@@ -38,12 +38,20 @@ async function renderHtml(htmlPath, opts = {}) {
     ({ chromium } = require('playwright'));
   } catch (e) {
     throw new Error(
-      'playwright is not installed. Run `npm install` in proxy-mcp and ' +
+      'playwright is not installed. Reinstall figma-proxy-mcp (it is a dependency) and run ' +
       '`npx playwright install chromium`, then retry verify_render.'
     );
   }
 
-  const browser = await chromium.launch({ headless: true });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (e) {
+    if (/Executable doesn't exist|playwright install/i.test(String(e && e.message))) {
+      throw new Error('Chromium for Playwright is not installed. Run once: `npx playwright install chromium` (about 150 MB download from Playwright\'s CDN), then retry verify_render.');
+    }
+    throw e;
+  }
   try {
     const context = await browser.newContext({
       viewport: { width: frameWidth, height: 900 },

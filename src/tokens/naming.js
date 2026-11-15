@@ -105,7 +105,7 @@ function classifyColor({ r, g, b, a }) {
   }
 
   // Chromatic — classify by hue
-  if (h >= 175 && h <= 210 && s > 60) return 'primary';    // #0dccf2, #00d3f2
+  if (h >= 175 && h <= 210 && s > 60) return 'primary';    // e.g. #1e90ff-ish cyans
   if (h >= 210 && h <= 245 && s > 50) return 'blue';
   if (h >= 245 && h <= 295 && s > 50) return 'purple';     // #a684ff, #4f39f6, #7f22fe
   if (h >= 295 && h <= 340 && s > 50) return 'pink';

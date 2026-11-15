@@ -18,12 +18,12 @@ async function figmaGet(pathAndQuery) {
   return res.json();
 }
 
-/** Parse a Figma URL into { fileId, nodeId } (nodeId in API "1648:198101" form). */
+/** Parse a Figma URL into { fileId, nodeId } (nodeId in API "123:456" form). */
 function parseFigmaUrl(url) {
   const u = new URL(url);
   const fileId = u.pathname.split('/')[2];
   const raw = u.searchParams.get('node-id');
-  const nodeId = raw ? raw.replace('-', ':') : null;
+  const nodeId = raw ? raw.replace(/-/g, ':') : null;
   return { fileId, nodeId };
 }
 

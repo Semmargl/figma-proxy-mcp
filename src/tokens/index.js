@@ -12,7 +12,7 @@
  *
  * Token table format (flat, CSS-vars-ready):
  *   {
- *     colors:       { '--color-primary': '#0dccf2', ... },
+ *     colors:       { '--color-primary': '#1e90ff', ... },
  *     spacing:      { '--spacing-8': '8px', ... },
  *     fontSizes:    { '--text-base': '14px', ... },
  *     fontFamilies: { '--font-sans': 'Inter', ... },
@@ -323,7 +323,7 @@ function annotateIR(ir, tokenTable) {
  * Render the token table as a CSS :root block.
  *
  * @param {object} tokenTable
- * @returns {string}  e.g. ":root {\n  --color-primary: #0dccf2;\n  ...\n}"
+ * @returns {string}  e.g. ":root {\n  --color-primary: #1e90ff;\n  ...\n}"
  */
 function toCssVars(tokenTable) {
   const lines = [];

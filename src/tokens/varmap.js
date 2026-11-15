@@ -9,9 +9,9 @@
  * Solution: walk the IR tree and correlate VARIABLE_ALIAS IDs with the resolved
  * values that co-exist on the same node. For example:
  *
- *   node.fills[0].color = "#0dccf2"
- *   node.boundVariables.fills[0].id = "VariableID:38:1693"
- *   → VariableID:38:1693 resolves to color "#0dccf2"
+ *   node.fills[0].color = "#1e90ff"
+ *   node.boundVariables.fills[0].id = "VariableID:1:23"
+ *   → VariableID:1:23 resolves to color "#1e90ff"
  *
  * We collect all such observations, then pick the mode (most frequent value)
  * per alias ID. The resulting map can be used to:

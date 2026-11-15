@@ -5,7 +5,7 @@
  * fixture and reports, with REAL numbers, what we feed the agent vs what Figma
  * gave us. This is how we prove the changes are correct and useful.
  *
- * Usage:  node scripts/inspect-ir.js fixtures/raw-node-1648-198101.json
+ * Usage:  node scripts/inspect-ir.js fixtures/raw-node-123-456.json
  */
 
 const fs = require('fs');

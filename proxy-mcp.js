@@ -1,11 +1,44 @@
 #!/usr/bin/env node
 
-const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-// Key is read from the environment / .env (see src/config.js). Never hardcode it.
-const { FIGMA_API_KEY } = require('./src/config');
+// Key is read from the environment / .env (see src/config.js). Never hardcode it,
+// never log it. All error text that may reach a client passes through redact().
+const { requireApiKey, redact, PATHS } = require('./src/config');
+const { INSTRUCTIONS } = require('./src/instructions');
+const PKG_VERSION = require('./package.json').version;
+const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+/** Figma file keys are alphanumeric; reject anything else before it reaches a URL path. */
+function assertFileKey(fileId) {
+  if (typeof fileId !== 'string' || !/^[A-Za-z0-9]{10,64}$/.test(fileId)) {
+    throw new Error('Invalid Figma file key. Copy it from the file URL: figma.com/design/<fileKey>/...');
+  }
+  return fileId;
+}
+
+/**
+ * Render/export URLs come from Figma's /v1/images response (short-lived signed
+ * URLs on Figma's image storage, currently Amazon S3). They are fetched without
+ * the token. Only https URLs are accepted.
+ */
+function assertHttpsUrl(u) {
+  let parsed;
+  try { parsed = new URL(u); } catch (_) { parsed = null; }
+  if (!parsed || parsed.protocol !== 'https:') throw new Error('Figma returned a non-https image URL; refusing to fetch it');
+}
+
+/** Turn a non-2xx Figma response into an actionable message (no secrets). */
+function figmaHttpError(status) {
+  const hints = {
+    400: 'bad request (check node-id / parameters)',
+    403: 'token missing, invalid, expired, or lacks the "File content: read" scope',
+    404: 'file or node not found, or your account has no access to the file',
+    429: 'rate limited by Figma, wait and retry',
+  };
+  return new Error(`Figma API error: ${status}${hints[status] ? ' - ' + hints[status] : ''}`);
+}
 const { toIR, fileToIR } = require('./src/ir/transform');
 const { flattenIR } = require('./src/ir/flatten');
 const { prune } = require('./src/prune');
@@ -23,19 +56,22 @@ class MCPProxyServer {
     try {
       const urlObj = new URL(url);
       
-      // Extract file ID from path: /design/{fileId}/...
+      if (!/(^|\.)figma\.com$/i.test(urlObj.hostname)) {
+        throw new Error('not a figma.com URL');
+      }
+      // Path: /design/{fileKey}/... (also /file/, /proto/, and
+      // /design/{fileKey}/branch/{branchKey}/... where the branch key is used).
       const pathParts = urlObj.pathname.split('/');
-      const fileId = pathParts[2]; // /design/{fileId}/...
-      
-      // Extract node ID from query params: ?node-id=1648-198101
+      let fileId = pathParts[2];
+      if (pathParts[3] === 'branch' && pathParts[4]) fileId = pathParts[4];
+
+      // Query: ?node-id=123-456  ->  API form 123:456 (instances: I1-2;3-4 -> I1:2;3:4)
       const rawNodeId = urlObj.searchParams.get('node-id');
-      
-      // Convert node ID format from 1648-198101 to 1648:198101 (Figma API format)
-      const nodeId = rawNodeId ? rawNodeId.replace('-', ':') : null;
-      
+      const nodeId = rawNodeId ? rawNodeId.replace(/-/g, ':') : null;
+
       return { fileId, nodeId };
     } catch (error) {
-      throw new Error(`Invalid Figma URL: ${error.message}`);
+      throw new Error(`Invalid Figma URL: ${redact(error.message)}`);
     }
   }
 
@@ -48,14 +84,14 @@ class MCPProxyServer {
         geometry: 'paths' // Get geometry but not full path data
       });
       
-      const response = await fetch(`https://api.figma.com/v1/files/${fileId}?${params}`, {
+      const response = await fetch(`https://api.figma.com/v1/files/${assertFileKey(fileId)}?${params}`, {
         headers: {
-          'X-Figma-Token': FIGMA_API_KEY
+          'X-Figma-Token': requireApiKey()
         }
       });
       
       if (!response.ok) {
-        throw new Error(`Figma API error: ${response.status}`);
+        throw figmaHttpError(response.status);
       }
       
       const data = await response.json();
@@ -63,7 +99,7 @@ class MCPProxyServer {
       this.figmaData = fileToIR(data);
       return this.figmaData;
     } catch (error) {
-      console.error('Error fetching Figma data:', error);
+      console.error('Error fetching Figma data:', redact(error && error.message));
       throw error;
     }
   }
@@ -80,14 +116,14 @@ class MCPProxyServer {
         geometry: 'paths' // Include geometry data
       });
       
-      const response = await fetch(`https://api.figma.com/v1/files/${fileId}/nodes?${params}`, {
+      const response = await fetch(`https://api.figma.com/v1/files/${assertFileKey(fileId)}/nodes?${params}`, {
         headers: {
-          'X-Figma-Token': FIGMA_API_KEY
+          'X-Figma-Token': requireApiKey()
         }
       });
       
       if (!response.ok) {
-        throw new Error(`Figma API error: ${response.status}`);
+        throw figmaHttpError(response.status);
       }
       
       const data = await response.json();
@@ -101,7 +137,7 @@ class MCPProxyServer {
       // boundVariables/componentId for later stages).
       return toIR(nodeData.document, typeof maxDepth === 'number' ? { maxDepth } : {});
     } catch (error) {
-      console.error('Error fetching Figma component:', error);
+      console.error('Error fetching Figma component:', redact(error && error.message));
       throw error;
     }
   }
@@ -112,21 +148,27 @@ class MCPProxyServer {
 
     try {
       switch (method) {
-        case 'initialize':
+        case 'initialize': {
+          const requested = params && params.protocolVersion;
           return {
             jsonrpc: '2.0',
             id,
             result: {
-              protocolVersion: '2024-11-05',
+              protocolVersion: SUPPORTED_PROTOCOLS.includes(requested) ? requested : '2024-11-05',
               capabilities: {
                 tools: {}
               },
               serverInfo: {
                 name: 'figma-proxy-mcp',
-                version: '1.0.0'
-              }
+                version: PKG_VERSION
+              },
+              instructions: INSTRUCTIONS
             }
           };
+        }
+
+        case 'ping':
+          return { jsonrpc: '2.0', id, result: {} };
 
         case 'tools/list':
           return {
@@ -232,8 +274,7 @@ class MCPProxyServer {
                       },
                       outputDir: {
                         type: 'string',
-                        description: 'Output directory for saved SVGs (default: ./exported-svgs)',
-                        default: './exported-svgs'
+                        description: 'Output directory for saved SVGs (default: $FIGMA_PROXY_SVG_DIR or ./exported-svgs relative to the server working directory; pass an absolute path to be explicit)'
                       }
                     },
                     required: ['fileId', 'nodeId']
@@ -255,7 +296,7 @@ class MCPProxyServer {
                       },
                       nodeId: {
                         type: 'string',
-                        description: 'Node ID to export (alternative to figmaUrl, use colon format: 133:167)'
+                        description: 'Node ID to export (alternative to figmaUrl, use colon format: 12:34)'
                       },
                       scale: {
                         type: 'number',
@@ -277,8 +318,7 @@ class MCPProxyServer {
                       },
                       outputDir: {
                         type: 'string',
-                        description: 'Output directory for exported SVGs (default: ./exported-svgs)',
-                        default: './exported-svgs'
+                        description: 'Output directory for exported SVGs (default: $FIGMA_PROXY_SVG_DIR or ./exported-svgs relative to the server working directory; pass an absolute path to be explicit)'
                       }
                     },
                     required: ['fileId']
@@ -318,7 +358,7 @@ class MCPProxyServer {
                 },
                 {
                   name: 'verify_render',
-                  description: 'Visual verification (MEASUREMENT ONLY): render an HTML file with headless Chromium INSIDE this server (does NOT use the user\'s Chrome / Control_Chrome) and compare it to the Figma design PNG. Returns SSIM (0-1, higher = closer), pixel-diff %, and clustered diff regions (bounding boxes of disagreement, in logical px). Provide the reference PNG via figmaUrl (auto-fetched), figmaPngPath, or figmaPngBase64. Use after generating HTML to objectively check fidelity, then fix only the reported regions — this tool never changes code. Requires `npm install` + `npx playwright install chromium`.',
+                  description: 'Visual verification (MEASUREMENT ONLY): render an HTML file with headless Chromium INSIDE this server (does NOT use the user\'s own browser) and compare it to the Figma design PNG. Returns SSIM (0-1, higher = closer), pixel-diff %, and clustered diff regions (bounding boxes of disagreement, in logical px). Provide the reference PNG via figmaUrl (auto-fetched), figmaPngPath, or figmaPngBase64. Use after generating HTML to objectively check fidelity, then fix only the reported regions — this tool never changes code. Requires Playwright Chromium: `npx playwright install chromium`.',
                   inputSchema: {
                     type: 'object',
                     properties: {
@@ -331,7 +371,7 @@ class MCPProxyServer {
                       threshold: { type: 'number', description: 'SSIM pass threshold (default 0.95).', default: 0.95 },
                       bg: { type: 'array', items: { type: 'number' }, description: 'Background [r,g,b] to flatten transparent reference-PNG pixels onto before comparing. Default [255,255,255]. For dark designs pass the real background (e.g. [13,17,23]) — otherwise transparent areas read as a false full diff.' },
                       clip: { type: 'array', items: { type: 'number' }, description: 'Optional [x,y,w,h] in CSS/logical px to compare ONLY the content area. Use it to exclude dead margins / parent-canvas background that the isolated frame cannot reproduce (that noise otherwise dominates the regions and masks real content diffs). Region coords are reported back in full-frame coords.' },
-                      outDir: { type: 'string', description: 'Directory for the diff image (default ./verify-out).', default: './verify-out' }
+                      outDir: { type: 'string', description: 'Directory for the diff image (default: $FIGMA_PROXY_VERIFY_DIR or <os temp dir>/figma-proxy-mcp/verify-out).' }
                     },
                     required: ['htmlPath', 'frameWidth']
                   }
@@ -347,6 +387,8 @@ class MCPProxyServer {
           return; // No response needed for notifications
 
         default:
+          // JSON-RPC notifications (no id) must never get a response.
+          if (id === undefined || id === null) return;
           return {
             jsonrpc: '2.0',
             id,
@@ -362,14 +404,15 @@ class MCPProxyServer {
         id,
         error: {
           code: -32603,
-          message: error.message
+          message: redact(error.message)
         }
       };
     }
   }
 
   async handleToolCall(params, id) {
-    const { name, arguments: args } = params;
+    const { name } = params || {};
+    const args = (params && params.arguments) || {};
 
     switch (name) {
       case 'get_figma_file':
@@ -400,7 +443,7 @@ class MCPProxyServer {
               content: [
                 {
                   type: 'text',
-                  text: `Error fetching Figma file: ${error.message}\n\nMake sure:\n1. The file ID is correct\n2. The file is public or you have access\n3. The API key is valid`
+                  text: `Error fetching Figma file: ${redact(error.message)}\n\nMake sure:\n1. The file ID is correct\n2. The file is public or you have access\n3. The API key is valid`
                 }
               ]
             }
@@ -461,7 +504,7 @@ class MCPProxyServer {
           let componentRegistry = null;
           let componentStats = null;
           if (!skipComponentize) {
-            const dataDir = path.join(__dirname, 'data');
+            const dataDir = PATHS.dataDir;
             const result = componentize(tokenizedIR, {
               dataDir,
               fileId: componentFileId,
@@ -587,7 +630,7 @@ class MCPProxyServer {
               content: [
                 {
                   type: 'text',
-                  text: `Error fetching Figma component: ${error.message}\n\nMake sure:\n1. The URL is a valid Figma design URL\n2. The URL contains node-id parameter\n3. You have access to the file\n4. The component exists\n\nExample URL format:\nhttps://www.figma.com/design/{fileId}/...?node-id={nodeId}`
+                  text: `Error fetching Figma component: ${redact(error.message)}\n\nMake sure:\n1. The URL is a valid Figma design URL\n2. The URL contains node-id parameter\n3. You have access to the file\n4. The component exists\n\nExample URL format:\nhttps://www.figma.com/design/{fileId}/...?node-id={nodeId}`
                 }
               ]
             }
@@ -595,7 +638,7 @@ class MCPProxyServer {
         }
 
       case 'export_svg':
-        const { fileId: svgFileId, nodeId: svgNodeId, scale = 1, save = false, fileName, outputDir = './exported-svgs' } = args;
+        const { fileId: svgFileId, nodeId: svgNodeId, scale = 1, save = false, fileName, outputDir = PATHS.svgDir } = args;
         
         if (!svgFileId || !svgNodeId) {
           throw new Error('Both fileId and nodeId are required');
@@ -636,7 +679,7 @@ class MCPProxyServer {
               content: [
                 {
                   type: 'text',
-                  text: `Error exporting SVG: ${error.message}\n\nMake sure:\n1. The file ID and node ID are correct\n2. The node can be exported as SVG\n3. You have access to the file`
+                  text: `Error exporting SVG: ${redact(error.message)}\n\nMake sure:\n1. The file ID and node ID are correct\n2. The node can be exported as SVG\n3. You have access to the file`
                 }
               ]
             }
@@ -690,7 +733,7 @@ class MCPProxyServer {
               content: [
                 {
                   type: 'text',
-                  text: `Error exporting PNG: ${error.message}\n\nMake sure:\n1. The file ID and node ID are correct\n2. You have access to the file`
+                  text: `Error exporting PNG: ${redact(error.message)}\n\nMake sure:\n1. The file ID and node ID are correct\n2. You have access to the file`
                 }
               ]
             }
@@ -699,7 +742,7 @@ class MCPProxyServer {
       }
 
       case 'migrate_all_svgs':
-        const { fileId: migrateFileId, outputDir: migrateOutputDir = './exported-svgs' } = args;
+        const { fileId: migrateFileId, outputDir: migrateOutputDir = PATHS.svgDir } = args;
         
         if (!migrateFileId) {
           throw new Error('File ID is required');
@@ -730,7 +773,7 @@ class MCPProxyServer {
               content: [
                 {
                   type: 'text',
-                  text: `Error migrating SVGs: ${error.message}\n\nMake sure:\n1. The file ID is correct\n2. You have access to the file\n3. The output directory is writable`
+                  text: `Error migrating SVGs: ${redact(error.message)}\n\nMake sure:\n1. The file ID is correct\n2. You have access to the file\n3. The output directory is writable`
                 }
               ]
             }
@@ -824,7 +867,7 @@ class MCPProxyServer {
         }
         const vScale = (args && args.scale) || 2;
         const vThreshold = (args && typeof args.threshold === 'number') ? args.threshold : 0.95;
-        const vOutDir = (args && args.outDir) || path.join(__dirname, 'verify-out');
+        const vOutDir = (args && args.outDir) || PATHS.verifyDir;
 
         try {
           // Resolve the reference PNG buffer
@@ -877,7 +920,7 @@ class MCPProxyServer {
             id,
             result: {
               content: [
-                { type: 'text', text: `Error in verify_render: ${error.message}\n\nIf this mentions playwright, run \`npm install\` in proxy-mcp and \`npx playwright install chromium\`.` }
+                { type: 'text', text: `Error in verify_render: ${redact(error.message)}\n\nIf this mentions playwright or a missing executable, run \`npx playwright install chromium\` once, then retry. Diagnose with \`npx figma-proxy-mcp --check\`.` }
               ]
             }
           };
@@ -898,14 +941,14 @@ class MCPProxyServer {
         scale: scale.toString()
       });
       
-      const response = await fetch(`https://api.figma.com/v1/images/${fileId}?${params}`, {
+      const response = await fetch(`https://api.figma.com/v1/images/${assertFileKey(fileId)}?${params}`, {
         headers: {
-          'X-Figma-Token': FIGMA_API_KEY
+          'X-Figma-Token': requireApiKey()
         }
       });
       
       if (!response.ok) {
-        throw new Error(`Figma API error: ${response.status}`);
+        throw figmaHttpError(response.status);
       }
       
       const data = await response.json();
@@ -916,6 +959,7 @@ class MCPProxyServer {
       }
       
       // Fetch the actual SVG content
+      assertHttpsUrl(svgUrl);
       const svgResponse = await fetch(svgUrl);
       if (!svgResponse.ok) {
         throw new Error(`Failed to fetch SVG content: ${svgResponse.status}`);
@@ -928,7 +972,7 @@ class MCPProxyServer {
       
       return svgContent;
     } catch (error) {
-      console.error('Error exporting SVG:', error);
+      console.error('Error exporting SVG:', redact(error && error.message));
       throw error;
     }
   }
@@ -942,12 +986,12 @@ class MCPProxyServer {
         scale: scale.toString(),
       });
 
-      const response = await fetch(`https://api.figma.com/v1/images/${fileId}?${params}`, {
-        headers: { 'X-Figma-Token': FIGMA_API_KEY },
+      const response = await fetch(`https://api.figma.com/v1/images/${assertFileKey(fileId)}?${params}`, {
+        headers: { 'X-Figma-Token': requireApiKey() },
       });
 
       if (!response.ok) {
-        throw new Error(`Figma API error: ${response.status}`);
+        throw figmaHttpError(response.status);
       }
 
       const data = await response.json();
@@ -961,6 +1005,7 @@ class MCPProxyServer {
       }
 
       // Download the PNG and convert to base64
+      assertHttpsUrl(imageUrl);
       const imgResponse = await fetch(imageUrl);
       if (!imgResponse.ok) {
         throw new Error(`Failed to fetch PNG: ${imgResponse.status}`);
@@ -972,13 +1017,13 @@ class MCPProxyServer {
 
       return { imageUrl, base64, size: buffer.length };
     } catch (error) {
-      console.error('Error exporting PNG:', error);
+      console.error('Error exporting PNG:', redact(error && error.message));
       throw error;
     }
   }
 
   // Save SVG to file system
-  async saveSVG(svgContent, fileName, outputDir = './exported-svgs') {
+  async saveSVG(svgContent, fileName, outputDir = PATHS.svgDir) {
     try {
       // Ensure output directory exists
       if (!fs.existsSync(outputDir)) {
@@ -993,13 +1038,13 @@ class MCPProxyServer {
       
       return filePath;
     } catch (error) {
-      console.error('Error saving SVG:', error);
+      console.error('Error saving SVG:', redact(error && error.message));
       throw error;
     }
   }
 
   // Migrate all SVG icons from a Figma file
-  async migrateAllSVGs(fileId, outputDir = './exported-svgs') {
+  async migrateAllSVGs(fileId, outputDir = PATHS.svgDir) {
     try {
       const figmaData = await this.fetchFigmaData(fileId);
       const svgNodes = this.findSVGNodes(figmaData);
@@ -1031,7 +1076,7 @@ class MCPProxyServer {
       
       return results;
     } catch (error) {
-      console.error('Error migrating SVGs:', error);
+      console.error('Error migrating SVGs:', redact(error && error.message));
       throw error;
     }
   }
@@ -1073,45 +1118,81 @@ class MCPProxyServer {
   }
 }
 
-// Handle stdio communication (what Cursor uses)
-if (process.argv.includes('--stdio')) {
+function printHelp() {
+  process.stdout.write(`figma-proxy-mcp ${PKG_VERSION} - read-only Figma -> code MCP server
+
+Usage:
+  figma-proxy-mcp --stdio      run as an MCP server over stdio (for MCP clients)
+  figma-proxy-mcp              run the HTTP JSON-RPC endpoint on 127.0.0.1:4444/mcp
+  figma-proxy-mcp --check      diagnose setup (Node, token, Figma API, Chromium)
+  figma-proxy-mcp --version    print version
+
+Environment:
+  FIGMA_API_KEY            Figma personal access token (required; read-only scope is enough)
+  FIGMA_PROXY_PORT         HTTP port (default 4444)
+  FIGMA_PROXY_HOST         HTTP bind address (default 127.0.0.1)
+  FIGMA_PROXY_CACHE_DIR    base dir for writes (default <os temp>/figma-proxy-mcp)
+See SECURITY.md for every host contacted and every file written.
+`);
+}
+
+function startStdio() {
   const server = new MCPProxyServer();
-  
+  let buffer = '';
+
+  const handleLine = async (line) => {
+    let request;
+    try {
+      request = JSON.parse(line);
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }) + '\n');
+      return;
+    }
+    try {
+      const response = await server.handleRequest(request);
+      if (response) process.stdout.write(JSON.stringify(response) + '\n');
+    } catch (error) {
+      console.error('Error processing request:', redact(error && error.message));
+    }
+  };
+
   process.stdin.setEncoding('utf8');
-  process.stdin.on('data', async (data) => {
-    const lines = data.trim().split('\n');
-    
-    for (const line of lines) {
-      if (line.trim()) {
-        try {
-          const request = JSON.parse(line);
-          const response = await server.handleRequest(request);
-          if (response) {
-            process.stdout.write(JSON.stringify(response) + '\n');
-          }
-        } catch (error) {
-          console.error('Error processing request:', error);
-        }
-      }
+  process.stdin.on('data', (chunk) => {
+    // Messages are newline-delimited; a chunk may hold several or a partial one.
+    buffer += chunk;
+    let nl;
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) handleLine(line);
     }
   });
-
-  process.on('SIGINT', () => {
-    process.exit(0);
+  process.stdin.on('end', () => {
+    const line = buffer.trim();
+    buffer = '';
+    if (line) handleLine(line);
   });
 
-  console.error('Figma Proxy MCP Server started in stdio mode');
-} else {
-  // HTTP mode for testing
+  process.on('SIGINT', () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+
+  console.error(`figma-proxy-mcp ${PKG_VERSION} started in stdio mode`);
+}
+
+function startHttp() {
+  const express = require('express');
   const app = express();
-  const port = 4444;
+  const port = Number(process.env.FIGMA_PROXY_PORT || 4444);
+  // Loopback only by default: the endpoint uses your Figma token and must not
+  // be reachable from the network unless you explicitly opt in.
+  const host = process.env.FIGMA_PROXY_HOST || '127.0.0.1';
   const server = new MCPProxyServer();
 
-  app.use(express.json());
+  app.use(express.json({ limit: '25mb' }));
 
   app.post('/mcp', async (req, res) => {
     try {
-      const response = await server.handleRequest(req.body);
+      const response = await server.handleRequest(req.body || {});
       if (response) {
         res.json(response);
       } else {
@@ -1120,19 +1201,39 @@ if (process.argv.includes('--stdio')) {
     } catch (error) {
       res.status(500).json({
         jsonrpc: '2.0',
-        id: req.body.id,
+        id: (req.body && req.body.id) ?? null,
         error: {
           code: -32603,
-          message: error.message
+          message: redact(error.message)
         }
       });
     }
   });
 
-    app.listen(port, () => {
-    console.log(`🔁 Figma Proxy MCP Server running at http://localhost:${port}/mcp`);
-    console.log('For Cursor integration, use: node proxy-mcp.js --stdio');
+  const httpServer = app.listen(port, host, () => {
+    console.log(`figma-proxy-mcp ${PKG_VERSION} HTTP endpoint: http://${host}:${port}/mcp`);
+    console.log('For MCP clients use stdio instead: npx -y figma-proxy-mcp --stdio');
   });
+  httpServer.on('error', (err) => {
+    console.error(`HTTP server error: ${err.code || err.message}${err.code === 'EADDRINUSE' ? ` (port ${port} busy; set FIGMA_PROXY_PORT)` : ''}`);
+    process.exit(1);
+  });
+  return httpServer;
+}
+
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printHelp();
+  } else if (argv.includes('--version') || argv.includes('-v')) {
+    process.stdout.write(PKG_VERSION + '\n');
+  } else if (argv.includes('--check') || argv.includes('--doctor')) {
+    require('./scripts/check-setup').main().then((code) => process.exit(code));
+  } else if (argv.includes('--stdio')) {
+    startStdio();
+  } else {
+    startHttp();
+  }
 }
 
 // Export for testing

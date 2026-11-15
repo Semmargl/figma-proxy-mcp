@@ -80,6 +80,12 @@ function checkChromium() {
     line('warn', 'Playwright', 'package not installed; verify_render will not work (npm install playwright)');
     return;
   }
+  const custom = process.env.FIGMA_PROXY_CHROME_PATH;
+  if (custom) {
+    if (fs.existsSync(custom)) line('ok', 'Chromium (verify_render)', 'using FIGMA_PROXY_CHROME_PATH');
+    else line('warn', 'Chromium (verify_render)', 'FIGMA_PROXY_CHROME_PATH points to a missing file');
+    return;
+  }
   try {
     const exe = chromium.executablePath();
     if (exe && fs.existsSync(exe)) {

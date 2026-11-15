@@ -24,7 +24,7 @@ function parseEnvFile(envPath) {
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
-    if (!(key in process.env)) process.env[key] = val;
+    if (!process.env[key]) process.env[key] = val; // empty env var counts as unset
   }
   return true;
 }
@@ -51,7 +51,8 @@ function loadDotEnv() {
   }
 }
 
-loadDotEnv();
+// FIGMA_PROXY_NO_DOTENV=1 disables .env loading entirely (env vars only).
+if (process.env.FIGMA_PROXY_NO_DOTENV !== '1') loadDotEnv();
 
 const os = require('os');
 

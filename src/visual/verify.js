@@ -45,10 +45,13 @@ async function renderHtml(htmlPath, opts = {}) {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    // FIGMA_PROXY_CHROME_PATH lets you use an existing Chrome/Chromium binary
+    // instead of downloading Playwright's build.
+    const executablePath = process.env.FIGMA_PROXY_CHROME_PATH || undefined;
+    browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   } catch (e) {
     if (/Executable doesn't exist|playwright install/i.test(String(e && e.message))) {
-      throw new Error('Chromium for Playwright is not installed. Run once: `npx playwright install chromium` (about 150 MB download from Playwright\'s CDN), then retry verify_render.');
+      throw new Error('Chromium for Playwright is not installed. Run once: `npx playwright install chromium` (about 150 MB download from Playwright\'s CDN), or set FIGMA_PROXY_CHROME_PATH to an installed Chrome/Chromium binary, then retry verify_render.');
     }
     throw e;
   }
@@ -338,7 +341,7 @@ function compareBuffers(renderBuf, refBuf, opts = {}) {
   let diffImagePath = null;
   if (opts.outDir) {
     const name = (opts.label || 'verify') + '-diff.png';
-    const candidates = [opts.outDir, path.join(require('os').tmpdir(), 'figma-verify')];
+    const candidates = [opts.outDir, path.join(require('os').tmpdir(), 'figma-proxy-mcp', 'verify-out')];
     for (const dir of candidates) {
       try {
         fs.mkdirSync(dir, { recursive: true });

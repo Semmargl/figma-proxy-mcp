@@ -51,12 +51,53 @@ function loadDotEnv() {
   }
 }
 
+/**
+ * Hosted mode (FIGMA_PROXY_HOSTED=1): the server runs as a shared/remote service
+ * (e.g. an Apify Standby Actor). Then:
+ *   - .env files and the global FIGMA_API_KEY are ignored; every request must
+ *     carry the caller's own token (see runWithToken / tokenFromHttpRequest);
+ *   - nothing is read from or written outside the OS temp dir (htmlPath,
+ *     figmaPngPath, outDir, outputDir, save are rejected or ignored);
+ *   - SVGs and diff images are returned inline in the response.
+ */
+const HOSTED = process.env.FIGMA_PROXY_HOSTED === '1';
+
 // FIGMA_PROXY_NO_DOTENV=1 disables .env loading entirely (env vars only).
-if (process.env.FIGMA_PROXY_NO_DOTENV !== '1') loadDotEnv();
+if (!HOSTED && process.env.FIGMA_PROXY_NO_DOTENV !== '1') loadDotEnv();
 
 const os = require('os');
+const { AsyncLocalStorage } = require('async_hooks');
 
-const FIGMA_API_KEY = (process.env.FIGMA_API_KEY || '').trim();
+const FIGMA_API_KEY = HOSTED ? '' : (process.env.FIGMA_API_KEY || '').trim();
+
+// Per-request token (hosted mode / HTTP header). Held only in memory for the
+// duration of the request; never logged, never written to disk.
+const tokenStore = new AsyncLocalStorage();
+
+/** Run fn with a per-request Figma token. A falsy token runs fn without one. */
+function runWithToken(token, fn) {
+  const t = typeof token === 'string' ? token.trim() : '';
+  return tokenStore.run(t ? { token: t } : {}, fn);
+}
+
+function currentRequestToken() {
+  const s = tokenStore.getStore();
+  return (s && s.token) || '';
+}
+
+/**
+ * Extract a caller-supplied token from an HTTP request (Express-like object):
+ * header `x-figma-token` (preferred) or query parameter `figmaToken`.
+ * The Authorization header is deliberately NOT used: gateways such as Apify
+ * consume it for their own authentication.
+ */
+function tokenFromHttpRequest(req) {
+  const h = req && req.headers && req.headers['x-figma-token'];
+  if (typeof h === 'string' && h.trim()) return h.trim();
+  const q = req && req.query && req.query.figmaToken;
+  if (typeof q === 'string' && q.trim()) return q.trim();
+  return '';
+}
 
 /**
  * Where the server may write. Everything defaults to the OS temp dir so that
@@ -67,22 +108,40 @@ const FIGMA_API_KEY = (process.env.FIGMA_API_KEY || '').trim();
  *   FIGMA_PROXY_SVG_DIR    export_svg / migrate_all_svgs default outputDir
  *                          (default: ./exported-svgs, relative to the cwd)
  */
-const CACHE_DIR = process.env.FIGMA_PROXY_CACHE_DIR || path.join(os.tmpdir(), 'figma-proxy-mcp');
-const PATHS = {
+// In hosted mode every path is forced under the OS temp dir.
+const CACHE_DIR = HOSTED
+  ? path.join(os.tmpdir(), 'figma-proxy-mcp')
+  : (process.env.FIGMA_PROXY_CACHE_DIR || path.join(os.tmpdir(), 'figma-proxy-mcp'));
+const PATHS = HOSTED ? {
+  cacheDir: CACHE_DIR,
+  dataDir: path.join(CACHE_DIR, 'data'),
+  verifyDir: path.join(CACHE_DIR, 'verify-out'),
+  svgDir: path.join(CACHE_DIR, 'svg'),
+} : {
   cacheDir: CACHE_DIR,
   dataDir: process.env.FIGMA_PROXY_DATA_DIR || path.join(CACHE_DIR, 'data'),
   verifyDir: process.env.FIGMA_PROXY_VERIFY_DIR || path.join(CACHE_DIR, 'verify-out'),
   svgDir: process.env.FIGMA_PROXY_SVG_DIR || './exported-svgs',
 };
 
-/** Remove any occurrence of the token from a string before it is shown or logged. */
+/** Remove any occurrence of a token (global or per-request) from a string before it is shown or logged. */
 function redact(text) {
-  const s = String(text == null ? '' : text);
-  if (!FIGMA_API_KEY || FIGMA_API_KEY.length < 8) return s;
-  return s.split(FIGMA_API_KEY).join('[REDACTED]');
+  let s = String(text == null ? '' : text);
+  for (const t of [FIGMA_API_KEY, currentRequestToken()]) {
+    if (t && t.length >= 8) s = s.split(t).join('[REDACTED]');
+  }
+  return s;
 }
 
 function requireApiKey() {
+  const perRequest = currentRequestToken();
+  if (perRequest) return perRequest;
+  if (HOSTED) {
+    throw new Error(
+      'No Figma token in this request. Send your Figma personal access token in the ' +
+      '`x-figma-token` HTTP header (or the `figmaToken` query parameter) when connecting to this server.'
+    );
+  }
   if (!FIGMA_API_KEY) {
     throw new Error(
       'FIGMA_API_KEY is not set. Pass it via the MCP client env block, export it in your shell, ' +
@@ -95,7 +154,10 @@ function requireApiKey() {
 
 module.exports = {
   FIGMA_API_KEY,
+  HOSTED,
   requireApiKey,
+  runWithToken,
+  tokenFromHttpRequest,
   redact,
   PATHS,
   // Default fetch depths — overridable per call.

@@ -11,6 +11,9 @@ data an agent can use directly, instead of the raw Figma tree:
 | `export_svg`, `migrate_all_svgs`, `list_svg_cache` | Icon / vector export |
 | `get_figma_file`, `get_cached_components`, `get_component_by_name` | File tree and component cache |
 
+**Free and self-hosted** (this package), or **hosted** with nothing to install: the same server
+runs as a pay-per-event Actor on the Apify Store (see [`apify/README.md`](apify/README.md)).
+
 **Read-only**: it never writes to your Figma files. Every host it contacts and every file
 it writes is listed in [SECURITY.md](SECURITY.md).
 
@@ -99,6 +102,15 @@ curl -s 127.0.0.1:4444/mcp -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_figma_component","arguments":{"figmaUrl":"<link with node-id>","summary":true}}}'
 ```
 It binds to loopback only. Change with `FIGMA_PROXY_PORT` / `FIGMA_PROXY_HOST`.
+A request may carry its own token in the `x-figma-token` header; it is used for that request only.
+
+### Hosted mode
+`FIGMA_PROXY_HOSTED=1` is for running the server as a shared remote service (the Apify Actor uses it).
+The token must come with each request (`x-figma-token` header, or `figmaToken` query parameter);
+`FIGMA_API_KEY` and `.env` are ignored. Parameters that point at the server's disk
+(`htmlPath`, `figmaPngPath`, `outDir`, `outputDir`, `save`, `fileName`) are hidden and rejected,
+everything is written under the OS temp dir only, SVGs and the diff image come back inline, and
+the HTML render may load only `data:` and public `https://` resources.
 
 ## 7. Recommended workflow
 The server also sends this to MCP clients as `instructions` on initialize.
@@ -107,10 +119,12 @@ The server also sends this to MCP clients as `instructions` on initialize.
 3. Per section: `get_figma_component {figmaUrl, format:"flat", lean:true}`.
 4. Build the markup with the `$--var` tokens and `relativeBox` coordinates.
 5. `render_node_png {figmaUrl, scale:2}` for the reference image.
-6. `verify_render {htmlPath, frameWidth, figmaUrl, scale:2}`, fix only the reported regions, repeat until SSIM ≥ threshold (default 0.95).
+6. `verify_render {htmlPath | html, frameWidth, figmaUrl, scale:2}`, fix only the reported regions, repeat until SSIM ≥ threshold (default 0.95).
 
-`verify_render` needs `htmlPath` (absolute path to a self-contained HTML file) and `frameWidth`
-(the Figma frame width = root `w` from the summary).
+`verify_render` needs exactly one of `htmlPath` (absolute path to a self-contained HTML file) or
+`html` (the document itself as a string, max 5 MB), plus `frameWidth` (the Figma frame width =
+root `w` from the summary). `returnImage:true` also returns the diff image (PNG, logical px).
+`export_svg` / `migrate_all_svgs` with `inline:true` return the SVG markup instead of a preview / files.
 
 ## 8. Environment variables
 | Variable | Default | Purpose |
@@ -124,6 +138,7 @@ The server also sends this to MCP clients as `instructions` on initialize.
 | `FIGMA_PROXY_CHROME_PATH` | (Playwright's Chromium) | Use an existing Chrome/Chromium binary |
 | `FIGMA_PROXY_PORT` / `FIGMA_PROXY_HOST` | 4444 / 127.0.0.1 | HTTP mode |
 | `FIGMA_PROXY_NO_DOTENV` | unset | `1` = ignore `.env` files |
+| `FIGMA_PROXY_HOSTED` | unset | `1` = hosted mode (per-request token, temp dirs only, inline output) |
 
 ## Troubleshooting
 | Symptom | Fix |

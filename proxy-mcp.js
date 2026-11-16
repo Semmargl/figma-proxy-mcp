@@ -5,8 +5,48 @@ const path = require('path');
 
 // Key is read from the environment / .env (see src/config.js). Never hardcode it,
 // never log it. All error text that may reach a client passes through redact().
-const { requireApiKey, redact, PATHS } = require('./src/config');
-const { INSTRUCTIONS } = require('./src/instructions');
+const { requireApiKey, redact, PATHS, HOSTED, runWithToken, tokenFromHttpRequest } = require('./src/config');
+const { getInstructions } = require('./src/instructions');
+const os = require('os');
+
+// Inline payload limits (hosted-friendly, keep responses sane).
+const MAX_INLINE_HTML_BYTES = 5 * 1024 * 1024;
+const DEFAULT_HOSTED_MAX_ICONS = 50;
+
+// Parameters that point at the server's own filesystem. They are meaningless
+// (and unsafe) on a hosted server, so hosted mode hides them from tools/list
+// and rejects them in tools/call.
+const LOCAL_ONLY_PARAMS = {
+  export_svg: ['save', 'fileName', 'outputDir'],
+  migrate_all_svgs: ['outputDir'],
+  verify_render: ['htmlPath', 'figmaPngPath', 'outDir'],
+};
+
+function toolsForMode(tools) {
+  if (!HOSTED) return tools;
+  return tools.map((t) => {
+    const drop = LOCAL_ONLY_PARAMS[t.name];
+    if (!drop) return t;
+    const properties = { ...t.inputSchema.properties };
+    for (const k of drop) delete properties[k];
+    const required = (t.inputSchema.required || []).filter((k) => !drop.includes(k));
+    return { ...t, inputSchema: { ...t.inputSchema, properties, required } };
+  });
+}
+
+function rejectLocalOnlyParams(tool, args) {
+  if (!HOSTED) return;
+  const used = (LOCAL_ONLY_PARAMS[tool] || []).filter((k) => args && args[k] !== undefined && args[k] !== false);
+  if (used.length) {
+    throw new Error(`${used.join(', ')} ${used.length > 1 ? 'are' : 'is'} not available on a hosted server (it cannot access your filesystem). ` +
+      (tool === 'verify_render' ? 'Send the HTML document inline in `html` and the reference as figmaUrl or figmaPngBase64.' : 'SVG content is returned inline in the response.'));
+  }
+}
+
+/** MCP tool error result (isError lets clients and billing tell failures apart). */
+function toolError(id, text) {
+  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: true } };
+}
 const PKG_VERSION = require('./package.json').version;
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
@@ -162,7 +202,7 @@ class MCPProxyServer {
                 name: 'figma-proxy-mcp',
                 version: PKG_VERSION
               },
-              instructions: INSTRUCTIONS
+              instructions: getInstructions(HOSTED)
             }
           };
         }
@@ -175,7 +215,7 @@ class MCPProxyServer {
             jsonrpc: '2.0',
             id,
             result: {
-              tools: [
+              tools: toolsForMode([
                 {
                   name: 'get_figma_file',
                   description: 'Get Figma file data by file ID and transform it for development',
@@ -275,6 +315,10 @@ class MCPProxyServer {
                       outputDir: {
                         type: 'string',
                         description: 'Output directory for saved SVGs (default: $FIGMA_PROXY_SVG_DIR or ./exported-svgs relative to the server working directory; pass an absolute path to be explicit)'
+                      },
+                      inline: {
+                        type: 'boolean',
+                        description: 'Return the full SVG markup in the response (structuredContent.svg) instead of a 500-char preview. Default false locally, always true on a hosted server.'
                       }
                     },
                     required: ['fileId', 'nodeId']
@@ -319,6 +363,14 @@ class MCPProxyServer {
                       outputDir: {
                         type: 'string',
                         description: 'Output directory for exported SVGs (default: $FIGMA_PROXY_SVG_DIR or ./exported-svgs relative to the server working directory; pass an absolute path to be explicit)'
+                      },
+                      inline: {
+                        type: 'boolean',
+                        description: 'Return every SVG\'s markup in the response (structuredContent.results[].svg) instead of writing files. Default false locally, always true on a hosted server (nothing is written).'
+                      },
+                      maxIcons: {
+                        type: 'number',
+                        description: 'Export at most this many icon nodes (default: unlimited locally, 50 on a hosted server).'
                       }
                     },
                     required: ['fileId']
@@ -358,11 +410,13 @@ class MCPProxyServer {
                 },
                 {
                   name: 'verify_render',
-                  description: 'Visual verification (MEASUREMENT ONLY): render an HTML file with headless Chromium INSIDE this server (does NOT use the user\'s own browser) and compare it to the Figma design PNG. Returns SSIM (0-1, higher = closer), pixel-diff %, and clustered diff regions (bounding boxes of disagreement, in logical px). Provide the reference PNG via figmaUrl (auto-fetched), figmaPngPath, or figmaPngBase64. Use after generating HTML to objectively check fidelity, then fix only the reported regions — this tool never changes code. Requires Playwright Chromium: `npx playwright install chromium`.',
+                  description: 'Visual verification (MEASUREMENT ONLY): render an HTML file with headless Chromium INSIDE this server (does NOT use the user\'s own browser) and compare it to the Figma design PNG. Returns SSIM (0-1, higher = closer), pixel-diff %, and clustered diff regions (bounding boxes of disagreement, in logical px). Provide the HTML as htmlPath (local file) or html (inline document) and the reference PNG via figmaUrl (auto-fetched), figmaPngPath, or figmaPngBase64. Use after generating HTML to objectively check fidelity, then fix only the reported regions — this tool never changes code. Requires Playwright Chromium: `npx playwright install chromium`.',
                   inputSchema: {
                     type: 'object',
                     properties: {
-                      htmlPath: { type: 'string', description: 'Absolute path to the generated .html file to render.' },
+                      htmlPath: { type: 'string', description: 'Absolute path to the generated .html file to render (local servers only). Provide exactly one of htmlPath or html.' },
+                      html: { type: 'string', description: 'The full self-contained HTML document as a string (inline CSS, images as data: or https URLs). Alternative to htmlPath; required on a hosted server. Max 5 MB.' },
+                      returnImage: { type: 'boolean', description: 'Also return the diff image (PNG, downscaled to logical px) as MCP image content. Default false locally, true on a hosted server.' },
                       frameWidth: { type: 'number', description: 'Figma frame width in CSS px (e.g. 1440 or 1920). HTML is rendered at this width.' },
                       figmaUrl: { type: 'string', description: 'Figma node URL — reference PNG fetched automatically at the given scale.' },
                       figmaPngPath: { type: 'string', description: 'Alternative to figmaUrl: local path to an already-saved reference PNG.' },
@@ -373,10 +427,10 @@ class MCPProxyServer {
                       clip: { type: 'array', items: { type: 'number' }, description: 'Optional [x,y,w,h] in CSS/logical px to compare ONLY the content area. Use it to exclude dead margins / parent-canvas background that the isolated frame cannot reproduce (that noise otherwise dominates the regions and masks real content diffs). Region coords are reported back in full-frame coords.' },
                       outDir: { type: 'string', description: 'Directory for the diff image (default: $FIGMA_PROXY_VERIFY_DIR or <os temp dir>/figma-proxy-mcp/verify-out).' }
                     },
-                    required: ['htmlPath', 'frameWidth']
+                    required: ['frameWidth']
                   }
                 }
-              ]
+              ])
             }
           };
 
@@ -445,7 +499,8 @@ class MCPProxyServer {
                   type: 'text',
                   text: `Error fetching Figma file: ${redact(error.message)}\n\nMake sure:\n1. The file ID is correct\n2. The file is public or you have access\n3. The API key is valid`
                 }
-              ]
+              ],
+              isError: true
             }
           };
         }
@@ -632,13 +687,16 @@ class MCPProxyServer {
                   type: 'text',
                   text: `Error fetching Figma component: ${redact(error.message)}\n\nMake sure:\n1. The URL is a valid Figma design URL\n2. The URL contains node-id parameter\n3. You have access to the file\n4. The component exists\n\nExample URL format:\nhttps://www.figma.com/design/{fileId}/...?node-id={nodeId}`
                 }
-              ]
+              ],
+              isError: true
             }
           };
         }
 
       case 'export_svg':
+        rejectLocalOnlyParams('export_svg', args);
         const { fileId: svgFileId, nodeId: svgNodeId, scale = 1, save = false, fileName, outputDir = PATHS.svgDir } = args;
+        const svgInline = HOSTED || args.inline === true;
         
         if (!svgFileId || !svgNodeId) {
           throw new Error('Both fileId and nodeId are required');
@@ -659,6 +717,22 @@ class MCPProxyServer {
             result.savedTo = filePath;
           }
           
+          if (svgInline) {
+            return {
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [
+                  {
+                    type: 'text',
+                    text: `SVG exported successfully:\n\n**Node ID:** ${svgNodeId}\n**Size:** ${result.size} characters\n${result.savedTo ? `**Saved to:** ${result.savedTo}\n` : ''}**Scale:** ${scale}\n\n**SVG:**\n\`\`\`svg\n${svgContent}\n\`\`\``
+                  }
+                ],
+                structuredContent: { nodeId: svgNodeId, scale, size: result.size, svg: svgContent, ...(result.savedTo ? { savedTo: result.savedTo } : {}) }
+              }
+            };
+          }
+
           return {
             jsonrpc: '2.0',
             id,
@@ -681,7 +755,8 @@ class MCPProxyServer {
                   type: 'text',
                   text: `Error exporting SVG: ${redact(error.message)}\n\nMake sure:\n1. The file ID and node ID are correct\n2. The node can be exported as SVG\n3. You have access to the file`
                 }
-              ]
+              ],
+              isError: true
             }
           };
         }
@@ -735,23 +810,46 @@ class MCPProxyServer {
                   type: 'text',
                   text: `Error exporting PNG: ${redact(error.message)}\n\nMake sure:\n1. The file ID and node ID are correct\n2. You have access to the file`
                 }
-              ]
+              ],
+              isError: true
             }
           };
         }
       }
 
       case 'migrate_all_svgs':
+        rejectLocalOnlyParams('migrate_all_svgs', args);
         const { fileId: migrateFileId, outputDir: migrateOutputDir = PATHS.svgDir } = args;
+        const migrateInline = HOSTED || args.inline === true;
+        const maxIcons = typeof args.maxIcons === 'number' && args.maxIcons > 0
+          ? Math.floor(args.maxIcons)
+          : (HOSTED ? DEFAULT_HOSTED_MAX_ICONS : Infinity);
         
         if (!migrateFileId) {
           throw new Error('File ID is required');
         }
 
         try {
-          const results = await this.migrateAllSVGs(migrateFileId, migrateOutputDir);
+          const results = await this.migrateAllSVGs(migrateFileId, migrateOutputDir, { inline: migrateInline, maxIcons });
           const successful = results.filter(r => r.success);
           const failed = results.filter(r => !r.success);
+
+          if (migrateInline) {
+            const truncatedNote = results.truncated ? `\n- Limited to the first ${maxIcons} of ${results.totalFound} candidate nodes (pass maxIcons to change)` : '';
+            return {
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [
+                  {
+                    type: 'text',
+                    text: `SVG Migration Complete (inline, nothing written to disk)\n\n**Summary:**\n- Total nodes processed: ${results.length}\n- Successfully exported: ${successful.length}\n- Failed: ${failed.length}${truncatedNote}\n\n${successful.map(r => `**${r.name}** (${r.nodeId}):\n\`\`\`svg\n${r.svg}\n\`\`\``).join('\n\n')}${failed.length > 0 ? `\n\n**Failed exports:**\n${failed.map(r => `- ${r.name}: ${r.error}`).join('\n')}` : ''}`
+                  }
+                ],
+                structuredContent: { total: results.length, exported: successful.length, failed: failed.length, truncated: !!results.truncated, results: results.slice() }
+              }
+            };
+          }
           
           return {
             jsonrpc: '2.0',
@@ -775,7 +873,8 @@ class MCPProxyServer {
                   type: 'text',
                   text: `Error migrating SVGs: ${redact(error.message)}\n\nMake sure:\n1. The file ID is correct\n2. You have access to the file\n3. The output directory is writable`
                 }
-              ]
+              ],
+              isError: true
             }
           };
         }
@@ -860,15 +959,30 @@ class MCPProxyServer {
 
       case 'verify_render': {
         const { verifyRender } = require('./src/visual/verify');
+        rejectLocalOnlyParams('verify_render', args);
         const vHtmlPath = args && args.htmlPath;
+        const vHtml = args && args.html;
         const vFrameWidth = args && args.frameWidth;
-        if (!vHtmlPath || !vFrameWidth) {
-          throw new Error('verify_render requires htmlPath and frameWidth');
+        if (!vFrameWidth) {
+          throw new Error('verify_render requires frameWidth');
+        }
+        const hasPath = typeof vHtmlPath === 'string' && vHtmlPath.length > 0;
+        const hasHtml = typeof vHtml === 'string' && vHtml.length > 0;
+        if (hasPath === hasHtml) {
+          throw new Error(HOSTED
+            ? 'verify_render requires html (the full HTML document as a string)'
+            : 'verify_render requires exactly one of htmlPath (absolute path to an .html file) or html (the HTML document as a string)');
+        }
+        if (hasHtml && Buffer.byteLength(vHtml, 'utf8') > MAX_INLINE_HTML_BYTES) {
+          throw new Error(`html is too large (max ${MAX_INLINE_HTML_BYTES / 1024 / 1024} MB). Inline fewer/smaller images or reference them by https URL.`);
         }
         const vScale = (args && args.scale) || 2;
         const vThreshold = (args && typeof args.threshold === 'number') ? args.threshold : 0.95;
-        const vOutDir = (args && args.outDir) || PATHS.verifyDir;
+        // Hosted: nothing is written to disk for the diff (it is returned inline).
+        const vOutDir = HOSTED ? undefined : ((args && args.outDir) || PATHS.verifyDir);
+        const vReturnImage = HOSTED ? args.returnImage !== false : args.returnImage === true;
 
+        let tmpDir = null;
         try {
           // Resolve the reference PNG buffer
           let referencePngBuffer;
@@ -879,14 +993,27 @@ class MCPProxyServer {
           } else if (args.figmaPngPath) {
             referencePngBuffer = fs.readFileSync(args.figmaPngPath);
           } else if (args.figmaPngBase64) {
-            referencePngBuffer = Buffer.from(args.figmaPngBase64, 'base64');
+            referencePngBuffer = Buffer.from(String(args.figmaPngBase64).replace(/^data:image\/png;base64,/, ''), 'base64');
           } else {
-            throw new Error('Provide a reference PNG: figmaUrl, figmaPngPath, or figmaPngBase64');
+            throw new Error(HOSTED
+              ? 'Provide a reference PNG: figmaUrl or figmaPngBase64'
+              : 'Provide a reference PNG: figmaUrl, figmaPngPath, or figmaPngBase64');
           }
 
-          const label = path.basename(vHtmlPath).replace(/\.html?$/i, '');
+          // Inline HTML is written to a private temp dir and removed afterwards.
+          let renderPath = vHtmlPath;
+          let label;
+          if (hasHtml) {
+            tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'figma-proxy-html-'));
+            renderPath = path.join(tmpDir, 'index.html');
+            fs.writeFileSync(renderPath, vHtml, 'utf8');
+            label = 'inline';
+          } else {
+            label = path.basename(vHtmlPath).replace(/\.html?$/i, '');
+          }
+
           const result = await verifyRender({
-            htmlPath: vHtmlPath,
+            htmlPath: renderPath,
             referencePngBuffer,
             frameWidth: vFrameWidth,
             scale: vScale,
@@ -895,22 +1022,29 @@ class MCPProxyServer {
             label,
             bg: Array.isArray(args.bg) ? args.bg : undefined,
             clip: Array.isArray(args.clip) ? args.clip : undefined,
+            returnDiffPng: vReturnImage,
+            restrictRequests: HOSTED,
           });
 
           const regions = result.diffRegions.map((r, i) =>
             `  ${i + 1}. [${r.type}] (${r.x},${r.y}) ${r.w}×${r.h} — render ${r.renderColor} vs design ${r.refColor} (Δ${r.colorDelta}), ${r.diffPixels}px`).join('\n')
             || '  (no regions above threshold)';
 
+          const content = [
+            {
+              type: 'text',
+              text: `Visual verification — ${label}:\n\n**SSIM:** ${result.ssim} (threshold ${result.threshold} → ${result.pass ? 'PASS ✅' : 'BELOW ❌'})\n**Pixel diff:** ${result.pixelDiffPct}% (${result.diffPixels} px of ${result.dims.w}×${result.dims.h})\n**Diff image:** ${result.diffPng ? 'attached below (logical px; red = differs)' : (result.diffImagePath || '(not saved)')}\n\n**Diff regions (logical px, largest first):**\n${regions}\n\nRead the regions and fix only those areas — this tool does not change code.`
+            }
+          ];
+          if (result.diffPng) {
+            content.push({ type: 'image', data: result.diffPng.toString('base64'), mimeType: 'image/png' });
+          }
+
           return {
             jsonrpc: '2.0',
             id,
             result: {
-              content: [
-                {
-                  type: 'text',
-                  text: `Visual verification — ${label}:\n\n**SSIM:** ${result.ssim} (threshold ${result.threshold} → ${result.pass ? 'PASS ✅' : 'BELOW ❌'})\n**Pixel diff:** ${result.pixelDiffPct}% (${result.diffPixels} px of ${result.dims.w}×${result.dims.h})\n**Diff image:** ${result.diffImagePath || '(not saved)'}\n\n**Diff regions (logical px, largest first):**\n${regions}\n\nRead the regions and fix only those areas — this tool does not change code.`
-                }
-              ],
+              content,
               structuredContent: result,
             }
           };
@@ -921,9 +1055,14 @@ class MCPProxyServer {
             result: {
               content: [
                 { type: 'text', text: `Error in verify_render: ${redact(error.message)}\n\nIf this mentions playwright or a missing executable, run \`npx playwright install chromium\` once, then retry. Diagnose with \`npx figma-proxy-mcp --check\`.` }
-              ]
+              ],
+              isError: true
             }
           };
+        } finally {
+          if (tmpDir) {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+          }
         }
       }
 
@@ -1044,23 +1183,33 @@ class MCPProxyServer {
   }
 
   // Migrate all SVG icons from a Figma file
-  async migrateAllSVGs(fileId, outputDir = PATHS.svgDir) {
+  // opts.inline: return SVG markup instead of writing files. opts.maxIcons caps the export count.
+  async migrateAllSVGs(fileId, outputDir = PATHS.svgDir, opts = {}) {
     try {
       const figmaData = await this.fetchFigmaData(fileId);
-      const svgNodes = this.findSVGNodes(figmaData);
+      const allNodes = this.findSVGNodes(figmaData);
+      const max = opts.maxIcons || Infinity;
+      const svgNodes = allNodes.slice(0, max);
       const results = [];
+      if (allNodes.length > svgNodes.length) {
+        Object.defineProperty(results, 'truncated', { value: true });
+        Object.defineProperty(results, 'totalFound', { value: allNodes.length });
+      }
       
       for (const node of svgNodes) {
         try {
           const svgContent = await this.exportSVG(fileId, node.id);
-          const filePath = await this.saveSVG(svgContent, node.name, outputDir);
-          
-          results.push({
-            nodeId: node.id,
-            name: node.name,
-            filePath: filePath,
-            success: true
-          });
+          if (opts.inline) {
+            results.push({ nodeId: node.id, name: node.name, svg: svgContent, size: svgContent.length, success: true });
+          } else {
+            const filePath = await this.saveSVG(svgContent, node.name, outputDir);
+            results.push({
+              nodeId: node.id,
+              name: node.name,
+              filePath: filePath,
+              success: true
+            });
+          }
           
           // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -1068,7 +1217,7 @@ class MCPProxyServer {
           results.push({
             nodeId: node.id,
             name: node.name,
-            error: error.message,
+            error: redact(error.message),
             success: false
           });
         }
@@ -1129,6 +1278,8 @@ Usage:
 
 Environment:
   FIGMA_API_KEY            Figma personal access token (required; read-only scope is enough)
+  FIGMA_PROXY_HOSTED=1     hosted mode: ignore FIGMA_API_KEY/.env, take the token per request
+                           (x-figma-token header), temp dirs only, inline SVG/diff output
   FIGMA_PROXY_PORT         HTTP port (default 4444)
   FIGMA_PROXY_HOST         HTTP bind address (default 127.0.0.1)
   FIGMA_PROXY_CACHE_DIR    base dir for writes (default <os temp>/figma-proxy-mcp)
@@ -1192,7 +1343,9 @@ function startHttp() {
 
   app.post('/mcp', async (req, res) => {
     try {
-      const response = await server.handleRequest(req.body || {});
+      // A caller may send its own token (x-figma-token header / figmaToken
+      // query); it is used for this request only and never logged.
+      const response = await runWithToken(tokenFromHttpRequest(req), () => server.handleRequest(req.body || {}));
       if (response) {
         res.json(response);
       } else {
@@ -1237,4 +1390,4 @@ if (require.main === module) {
 }
 
 // Export for testing
-module.exports = { MCPProxyServer };
+module.exports = { MCPProxyServer, HOSTED, runWithToken, tokenFromHttpRequest };

@@ -62,6 +62,22 @@ async function renderHtml(htmlPath, opts = {}) {
     });
     const page = await context.newPage();
     const fileUrl = 'file://' + path.resolve(htmlPath);
+    if (opts.restrictRequests) {
+      // Hosted mode: the HTML is untrusted caller input. Allow only the page
+      // itself, data:/blob: URLs and public https resources (web fonts, images).
+      // Everything else (other file:// paths, plain http, e.g. cloud metadata
+      // endpoints) is blocked so the render cannot read the server's disk or
+      // reach internal services.
+      const pageHref = new URL(fileUrl).href;
+      await context.route('**/*', (route) => {
+        const u = route.request().url();
+        if (u === pageHref || /^(data|blob):/i.test(u)) return route.continue();
+        let parsed = null;
+        try { parsed = new URL(u); } catch (_) { /* invalid */ }
+        if (parsed && parsed.protocol === 'https:' && !isPrivateHost(parsed.hostname)) return route.continue();
+        return route.abort('blockedbyclient');
+      });
+    }
     await page.goto(fileUrl, { waitUntil: 'networkidle' });
     // Give web fonts / late layout a beat.
     await page.waitForTimeout(300);
@@ -72,7 +88,46 @@ async function renderHtml(htmlPath, opts = {}) {
   }
 }
 
+/** True for localhost / private / link-local literal hosts (best effort, no DNS). */
+function isPrivateHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
+  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.)/.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return h.includes(':');
+  return false;
+}
+
 // ── Image helpers (pngjs) ─────────────────────────────────────────────────────
+
+/**
+ * Integer downscale that keeps diff markers visible: for each block, take the
+ * pixel with the strongest red dominance (pixelmatch paints diffs red), so thin
+ * diff lines survive instead of being averaged away.
+ */
+function downscaleKeepDiff(png, factor) {
+  if (factor <= 1) return png;
+  const { PNG } = require('pngjs');
+  const W = Math.max(1, Math.floor(png.width / factor));
+  const H = Math.max(1, Math.floor(png.height / factor));
+  const outPng = new PNG({ width: W, height: H });
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let best = -1; let bi = 0;
+      for (let dy = 0; dy < factor; dy++) {
+        for (let dx = 0; dx < factor; dx++) {
+          const i = (((y * factor + dy) * png.width) + (x * factor + dx)) * 4;
+          const score = png.data[i] - (png.data[i + 1] + png.data[i + 2]) / 2;
+          if (score > best) { best = score; bi = i; }
+        }
+      }
+      const o = (y * W + x) * 4;
+      outPng.data[o] = png.data[bi]; outPng.data[o + 1] = png.data[bi + 1];
+      outPng.data[o + 2] = png.data[bi + 2]; outPng.data[o + 3] = png.data[bi + 3];
+    }
+  }
+  return outPng;
+}
 
 function readPng(buffer) {
   const { PNG } = require('pngjs');
@@ -355,7 +410,7 @@ function compareBuffers(renderBuf, refBuf, opts = {}) {
     }
   }
 
-  return {
+  const out = {
     ssim: Number(ssim.toFixed(4)),
     pixelDiffPct: Number((pixelDiffPct * 100).toFixed(3)),
     diffPixels,
@@ -363,6 +418,13 @@ function compareBuffers(renderBuf, refBuf, opts = {}) {
     diffImagePath,
     diffRegions,
   };
+  // Optionally hand the diff image back to the caller (non-enumerable so it is
+  // never serialised into structuredContent by accident). Downscaled to logical
+  // px (1x) to keep remote responses small; red diff pixels are preserved.
+  if (opts.returnDiffPng) {
+    Object.defineProperty(out, 'diffPng', { value: writePng(downscaleKeepDiff(diff, Math.max(1, Math.round(scale)))), enumerable: false });
+  }
+  return out;
 }
 
 /**
@@ -377,9 +439,10 @@ async function verifyRender(opts) {
   if (!htmlPath || !referencePngBuffer || !frameWidth) {
     throw new Error('verifyRender requires htmlPath, referencePngBuffer and frameWidth');
   }
-  const renderBuf = await renderHtml(htmlPath, { frameWidth, scale });
+  const renderBuf = await renderHtml(htmlPath, { frameWidth, scale, restrictRequests: !!opts.restrictRequests });
   const result = compareBuffers(renderBuf, referencePngBuffer, {
     scale,
+    returnDiffPng: !!opts.returnDiffPng,
     outDir: opts.outDir,
     label: opts.label,
     bg: opts.bg,
@@ -390,4 +453,4 @@ async function verifyRender(opts) {
   return result;
 }
 
-module.exports = { verifyRender, compareBuffers, renderHtml, meanSSIM, clusterRegions, flattenAlpha, enrichRegions };
+module.exports = { verifyRender, compareBuffers, renderHtml, isPrivateHost, downscaleKeepDiff, meanSSIM, clusterRegions, flattenAlpha, enrichRegions };

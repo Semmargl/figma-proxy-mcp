@@ -1,7 +1,8 @@
 # Security and privacy
 
 figma-proxy-mcp is a local MCP server. It runs on your machine, uses your Figma
-personal access token, and only **reads** from Figma. It has no telemetry and no
+personal access token, and only **reads** from Figma. (A hosted variant exists; see
+*Hosted mode* below.) It has no telemetry and no
 analytics, and sends nothing anywhere except the requests listed below.
 
 ## Read-only
@@ -11,7 +12,9 @@ edits, comments on or deletes anything in Figma.
 
 ## Token handling
 
-- The token is read only from the `FIGMA_API_KEY` environment variable or a `.env` file.
+- The token is read only from the `FIGMA_API_KEY` environment variable or a `.env` file,
+  or, in HTTP / hosted mode, from the `x-figma-token` header (or `figmaToken` query
+  parameter) of the request, for that request only.
   Resolution order: real environment variable → `.env` in the current working directory
   → `.env` next to the installed package. Set `FIGMA_PROXY_NO_DOTENV=1` to use env vars only.
 - The token is sent only to `api.figma.com` in the `X-Figma-Token` header.
@@ -57,6 +60,20 @@ cache shown by `list_svg_cache` is lost when the process exits). The server writ
 - `verify_render` reads the `htmlPath` you pass and, if given, `figmaPngPath`.
   The server reads these local paths on behalf of the MCP client, so only connect it
   to clients and agents you trust.
+
+## Hosted mode (`FIGMA_PROXY_HOSTED=1`, used by the Apify Actor)
+
+- `FIGMA_API_KEY` and `.env` files are ignored. Each MCP request must carry the caller's
+  own token (`x-figma-token` header preferred; the `figmaToken` query parameter works
+  but URLs are more likely to end up in logs). The token is kept in memory for the
+  request/session only, sent only to `api.figma.com`, never logged and never stored.
+- No file outside the OS temp dir is read or written: `htmlPath`, `figmaPngPath`,
+  `outDir`, `outputDir`, `save` and `fileName` are rejected. Inline `html` is written to
+  a private temp dir and deleted after the render; SVGs and the diff image are returned
+  in the response and not written to disk.
+- The caller's HTML is untrusted: while rendering it, Chromium may load only the page
+  itself, `data:`/`blob:` URLs and `https://` URLs on public hosts. Other `file://` paths,
+  plain `http://` and localhost/private/link-local addresses are blocked.
 
 ## Dependencies
 

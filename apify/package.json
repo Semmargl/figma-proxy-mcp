@@ -1,0 +1,21 @@
+{
+  "name": "figma-proxy-mcp-actor",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Apify Standby Actor that serves figma-proxy-mcp over Streamable HTTP with pay-per-event billing.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "apify": "^3.7.0",
+    "express": "^5.1.0",
+    "figma-proxy-mcp": "^1.2.0"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node test/local-standby.mjs"
+  },
+  "license": "MIT"
+}

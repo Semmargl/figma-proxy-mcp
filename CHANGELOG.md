@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.0
+
+### Added
+- `verify_render` accepts `html` (the full HTML document as a string) as an alternative to
+  `htmlPath`; exactly one of the two is required. Inline HTML is written to a private temp
+  dir and removed after the render.
+- `verify_render` `returnImage: true` attaches the diff image as MCP image content (PNG,
+  downscaled to logical px so responses stay small; diff pixels are preserved).
+- `export_svg` / `migrate_all_svgs` `inline: true` return the full SVG markup in the
+  response (`structuredContent`) instead of a preview / file paths. `migrate_all_svgs`
+  gets `maxIcons`.
+- Hosted mode (`FIGMA_PROXY_HOSTED=1`) for running the server as a shared/remote service:
+  the token comes per request (`x-figma-token` header or `figmaToken` query parameter),
+  `FIGMA_API_KEY` and `.env` are ignored, filesystem parameters (`htmlPath`, `figmaPngPath`,
+  `outDir`, `outputDir`, `save`, `fileName`) are hidden from `tools/list` and rejected,
+  writes stay in the OS temp dir, SVGs and diff images are returned inline, and the
+  render of caller HTML may only load the page itself, `data:` URLs and public `https` URLs.
+- HTTP mode accepts a per-request token in the `x-figma-token` header.
+- Apify Actor in `apify/` (hosted, pay-per-event version of this server).
+
+### Changed
+- Tool failures now set `isError: true` on the result (text unchanged).
+- `migrate_all_svgs` error entries are redacted like every other error.
+
+
 ## 1.1.1
 
 - Add `mcpName` and `server.json` for the official MCP Registry (io.github.Semmargl/figma-proxy-mcp).

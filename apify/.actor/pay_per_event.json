@@ -1,0 +1,17 @@
+{
+    "tool-call": {
+        "eventTitle": "Figma tool call",
+        "eventDescription": "A successful Figma data or SVG call: get_figma_component, get_figma_file, export_svg, or one exported icon in migrate_all_svgs. Failed calls are free.",
+        "eventPriceUsd": 0.005
+    },
+    "render": {
+        "eventTitle": "Figma render (PNG)",
+        "eventDescription": "A successful render_node_png: Figma renders the node and the PNG is returned. Failed calls are free.",
+        "eventPriceUsd": 0.02
+    },
+    "verify": {
+        "eventTitle": "Visual verification",
+        "eventDescription": "A successful verify_render: your HTML is rendered in headless Chromium and compared with the Figma design (SSIM, pixel diff, diff regions, diff image). Failed calls are free.",
+        "eventPriceUsd": 0.05
+    }
+}

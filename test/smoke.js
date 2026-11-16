@@ -22,7 +22,7 @@ const SERVER = path.join(ROOT, 'proxy-mcp.js');
 // so a developer's real token is never picked up or sent anywhere by the tests.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), 'fpm-smoke-'));
 const ENV = { ...process.env, FIGMA_API_KEY: '', FIGMA_PROXY_NO_DOTENV: '1', FIGMA_PROXY_HOSTED: '', FIGMA_PROXY_CACHE_DIR: path.join(CWD, 'cache') };
-const HOSTED_ENV = { ...ENV, FIGMA_PROXY_HOSTED: '1', FIGMA_API_KEY: 'figd_ENV_TOKEN_MUST_BE_IGNORED_IN_HOSTED' };
+const HOSTED_ENV = { ...ENV, FIGMA_PROXY_HOSTED: '1', FIGMA_API_KEY: 'fake-env-token-must-be-ignored-in-hosted' };
 // The in-process tests below require the server modules directly: same isolation.
 Object.assign(process.env, { FIGMA_API_KEY: '', FIGMA_PROXY_NO_DOTENV: '1', FIGMA_PROXY_HOSTED: '', FIGMA_PROXY_CACHE_DIR: path.join(CWD, 'cache') });
 
@@ -248,7 +248,7 @@ async function main() {
 
   await step('in-process: per-request token, inline export_svg / migrate_all_svgs (stubbed Figma API)', async () => {
     const { MCPProxyServer, runWithToken, tokenFromHttpRequest } = require('../proxy-mcp.js');
-    const TOKEN = 'figd_PER_REQUEST_TEST_TOKEN_0123456789';
+    const TOKEN = 'fake-per-request-test-token-0123456789';
     const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>';
     const seen = [];
     const realFetch = global.fetch;

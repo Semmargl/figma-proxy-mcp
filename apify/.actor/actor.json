@@ -1,0 +1,25 @@
+{
+    "$schema": "https://apify.com/schemas/v1/actor.ide.json",
+    "actorSpecification": 1,
+    "name": "figma-proxy-mcp",
+    "title": "Figma Proxy MCP — Figma to code with visual diff",
+    "description": "Hosted read-only Figma MCP server for AI coding agents: compact design IR, CSS variables, Tailwind theme, PNG/SVG export and visual diff (SSIM) of your HTML against the Figma frame. Bring your own Figma token.",
+    "version": "1.2",
+    "buildTag": "latest",
+    "usesStandbyMode": true,
+    "webServerMcpPath": "/mcp",
+    "minMemoryMbytes": 1024,
+    "maxMemoryMbytes": 4096,
+    "meta": {
+        "templateId": "ts-mcp-proxy"
+    },
+    "inputSchema": {
+        "title": "Figma Proxy MCP",
+        "description": "No input needed. This Actor runs in Standby mode as an MCP server: connect your MCP client to the Standby URL with your Apify token (Authorization header) and your Figma token (x-figma-token header).",
+        "type": "object",
+        "schemaVersion": 1,
+        "properties": {},
+        "required": []
+    },
+    "dockerfile": "../Dockerfile"
+}

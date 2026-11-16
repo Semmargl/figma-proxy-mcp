@@ -31,7 +31,7 @@ You need two tokens:
 MCP endpoint (Streamable HTTP):
 
 ```
-https://OWNER--figma-proxy-mcp.apify.actor/mcp
+https://semmargl--figma-proxy-mcp.apify.actor/mcp
 ```
 
 Send the Apify token as `Authorization: Bearer <APIFY_TOKEN>` and the Figma token as
@@ -40,7 +40,7 @@ Send the Apify token as `Authorization: Bearer <APIFY_TOKEN>` and the Figma toke
 **Claude Code**
 
 ```bash
-claude mcp add --transport http figma-proxy https://OWNER--figma-proxy-mcp.apify.actor/mcp \
+claude mcp add --transport http figma-proxy https://semmargl--figma-proxy-mcp.apify.actor/mcp \
   --header "Authorization: Bearer <APIFY_TOKEN>" \
   --header "x-figma-token: <FIGMA_TOKEN>"
 ```
@@ -51,7 +51,7 @@ claude mcp add --transport http figma-proxy https://OWNER--figma-proxy-mcp.apify
 {
   "mcpServers": {
     "figma-proxy": {
-      "url": "https://OWNER--figma-proxy-mcp.apify.actor/mcp",
+      "url": "https://semmargl--figma-proxy-mcp.apify.actor/mcp",
       "headers": {
         "Authorization": "Bearer <APIFY_TOKEN>",
         "x-figma-token": "<FIGMA_TOKEN>"
